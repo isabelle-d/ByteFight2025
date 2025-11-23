@@ -1,11 +1,10 @@
 import math
+from collections import deque
 from collections.abc import Callable
-from time import sleep
 from typing import List, Set, Tuple
 from .trapdoor_belief import TrapdoorBelief
-
 import numpy as np
-from engine.game import *
+from game import *
 
 """
 min max algo with alpha pruning, bayes for updating belief for trapdoors
@@ -35,10 +34,33 @@ def evaluate(board, belief):
     opp_moves = len(get_enemy_moves(board))
     score += 0.1 * (my_moves - opp_moves)
 
+    my_area = reachable_area(board)
+    opp_area = reachable_area_enemy(board)
+
+    score += 0.05 * (my_area - opp_area)
+
     #egg bump
     x,y = board.chicken_player.get_location()
     if ((x+y) % 2 == 0):
         score += 0.4
+
+
+
+    # Offesne turd bonus
+    px, py = board.chicken_player.get_location()
+    ex, ey = board.chicken_enemy.get_location()
+    dist = abs(px - ex) + abs(py - ey)
+
+    if board.chicken_player.get_turds_left() > 0:
+        if dist == 2:
+            score += 1.0
+        elif dist == 3:
+            score += 0.3
+    # standing next to your own turds
+    for (tx, ty) in board.turds_player:
+        d = abs(tx - x) + abs(ty - y)
+        if d == 1:
+            score -= 0.8
 
     #turd penalty, dont want to be next to turds b/c limit movement, small penalty depending
     for (tx,ty) in board.turds_enemy:
@@ -47,6 +69,10 @@ def evaluate(board, belief):
             score -= 1.5
         elif d == 2:
             score -= 0.4
+    # Avoid self-blocking with turds
+    if board.chicken_player.get_turds_left() > 0:
+        if len(board.get_valid_moves()) <= 2:   # very tight space
+            score -= 2.0
 
     # Trapdoor penalty
     if belief is not None:
@@ -78,6 +104,51 @@ def get_enemy_moves(board):
             child.reverse_perspective()
             return child.get_valid_moves()
     return []
+
+#try and fix getting stuck
+def reachable_area(board):
+    start = board.chicken_player.get_location()
+    visited = {start}
+    q = deque([start])
+    while q:
+        x, y = q.popleft()
+        for dx, dy in [(1,0),(-1,0),(0,1),(0,-1)]:
+            nx, ny = x + dx, y + dy
+            if not board.is_valid_cell((nx, ny)):
+                continue
+            if board.is_cell_blocked((nx, ny)):
+                continue
+            if (nx, ny) not in visited:
+                visited.add((nx, ny))
+                q.append((nx, ny))
+
+    return len(visited)
+
+def reachable_area_enemy(board):
+    start = board.chicken_enemy.get_location()
+    visited = {start}
+    q = deque([start])
+
+    while q:
+        x, y = q.popleft()
+        for dx, dy in [(1,0),(-1,0),(0,1),(0,-1)]:
+            nx, ny = x + dx, y + dy
+
+            # enemy movement uses enemy=True checks
+            if not board.is_valid_cell((nx, ny)):
+                continue
+
+            # enemy cannot move into its own blocked zones
+            # reuse board.is_valid_move by simulating a step
+            if board.is_cell_blocked((nx, ny)):
+                continue
+
+            if (nx, ny) not in visited:
+                visited.add((nx, ny))
+                q.append((nx, ny))
+
+    return len(visited)
+
 
 def minimax(board, depth, alpha, beta, isMaximizing, belief):
     if depth == 0 or board.is_game_over():
