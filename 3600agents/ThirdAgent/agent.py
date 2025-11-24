@@ -4,13 +4,14 @@ from collections.abc import Callable
 from typing import List, Set, Tuple
 from .trapdoor_belief import TrapdoorBelief
 import numpy as np
+import random
 from game import *
 
 """
 min max algo with alpha pruning, bayes for updating belief for trapdoors
 """
 
-def evaluate(board, belief):
+def evaluate(board, belief, pos_history=None):
     """
     added penalty for: trapdoor (based on bayes net), turds,
     bonus for corners, and movement for eggs
@@ -18,67 +19,82 @@ def evaluate(board, belief):
     try:
         my_eggs = board.chicken_player.get_eggs_laid()
         opp_eggs = board.chicken_enemy.get_eggs_laid()
-    except:
+    except Exception:
         my_eggs = len(board.eggs_player)
         opp_eggs = len(board.eggs_enemy)
 
-    score = my_eggs - opp_eggs
+    score = 10 * (my_eggs - opp_eggs)  # egg advantage dominates
 
-    #corner eggs good
+    # corner eggs bonus
     corners = {(0,0), (0, board.game_map.MAP_SIZE-1),
                (board.game_map.MAP_SIZE-1, 0),
                (board.game_map.MAP_SIZE-1, board.game_map.MAP_SIZE-1)}
-    score += 0.5 * sum(1 for e in board.eggs_player if e in corners)
+    score += 3.0 * sum(1 for e in board.eggs_player if e in corners)
 
+    # movement / mobility
     my_moves = len(board.get_valid_moves())
     opp_moves = len(get_enemy_moves(board))
-    score += 0.1 * (my_moves - opp_moves)
+    score += 0.5 * (my_moves - opp_moves)
 
+    # reachable area bonus
     my_area = reachable_area(board)
     opp_area = reachable_area_enemy(board)
+    score += 0.2 * (my_area - opp_area)
 
-    score += 0.05 * (my_area - opp_area)
+    # egg bump for white squares
+    x, y = board.chicken_player.get_location()
+    if ((x + y) % 2 == 0):
+        score += 1.0
 
-    #egg bump
-    x,y = board.chicken_player.get_location()
-    if ((x+y) % 2 == 0):
-        score += 0.4
-
-
-
-    # Offesne turd bonus
+    # offense turd bonus if close enough
     px, py = board.chicken_player.get_location()
     ex, ey = board.chicken_enemy.get_location()
     dist = abs(px - ex) + abs(py - ey)
 
     if board.chicken_player.get_turds_left() > 0:
         if dist == 2:
-            score += 1.0
+            score += 2.0
         elif dist == 3:
-            score += 0.3
-    # standing next to your own turds
-    for (tx, ty) in board.turds_player:
+            score += 0.5
+
+    # penalties for proximity to turds
+    for tx, ty in board.turds_player:
         d = abs(tx - x) + abs(ty - y)
         if d == 1:
-            score -= 0.8
-
-    #turd penalty, dont want to be next to turds b/c limit movement, small penalty depending
-    for (tx,ty) in board.turds_enemy:
-        d = abs(tx-x)+abs(ty-y)
+            score -= 1.0
+    for tx, ty in board.turds_enemy:
+        d = abs(tx - x) + abs(ty - y)
         if d == 1:
-            score -= 1.5
-        elif d == 2:
-            score -= 0.4
-    # Avoid self-blocking with turds
-    if board.chicken_player.get_turds_left() > 0:
-        if len(board.get_valid_moves()) <= 2:   # very tight space
             score -= 2.0
+        elif d == 2:
+            score -= 0.5
 
-    # Trapdoor penalty
+    # self-blocking penalty
+    if board.chicken_player.get_turds_left() > 0 and my_moves <= 2:
+        score -= 5.0
+
+    # trapdoor penalty
     if belief is not None:
-        score += expected_trapdoor_penalty(board, belief)
+        try:
+            p_fall = belief.white_probs[x, y] + belief.black_probs[x, y]
+            if p_fall > 0.1:  # anything non-negligible
+                score -= 5.0 * p_fall
+        except Exception:
+            pass
 
-    return score
+    # repeat-position penalties
+    if pos_history is not None and len(pos_history) >= 2:
+        # penalize revisiting same spot multiple times
+        repeats = pos_history.count((x, y))
+        if repeats > 1:
+            score -= 4.0 * (repeats - 1)
+        # penalize immediate back-and-forth
+        if pos_history[-1] == pos_history[-3] if len(pos_history) >= 3 else False:
+            score -= 3.0
+
+    return float(score)
+
+
 
 def expected_trapdoor_penalty(board, belief):
     x, y = board.chicken_player.get_location()
@@ -88,7 +104,9 @@ def expected_trapdoor_penalty(board, belief):
     p_fall_white = belief.white_probs[x,y]
     p_fall_black = belief.black_probs[x,y]
     p_total = p_fall_white + p_fall_black
-    return -4 * p_total
+    if p_total > 0.3:
+        return -2 * p_total
+    return 0
 
 def egg_opportunity(board):
     (x,y) = board.chicken_player.get_location()
@@ -125,20 +143,39 @@ def reachable_area(board):
     return len(visited)
 
 def reachable_area_enemy(board):
-    # Create a perspective-swapped board without copying
-    board.reverse_perspective()
-    area = reachable_area(board)
-    board.reverse_perspective()
-    return area
+    start = board.chicken_enemy.get_location()
+    visited = {start}
+    q = deque([start])
+
+    while q:
+        x, y = q.popleft()
+        for dx, dy in [(1,0),(-1,0),(0,1),(0,-1)]:
+            nx, ny = x + dx, y + dy
+
+            # enemy movement uses enemy=True checks
+            if not board.is_valid_cell((nx, ny)):
+                continue
+
+            # enemy cannot move into its own blocked zones
+            # reuse board.is_valid_move by simulating a step
+            if board.is_cell_blocked((nx, ny)):
+                continue
+
+            if (nx, ny) not in visited:
+                visited.add((nx, ny))
+                q.append((nx, ny))
+
+    return len(visited)
 
 def move_reachable_area_after(board, direction, move_type):
     child = board.forecast_move(direction, move_type)
     if child is None:
-        return -1   # invalid move
+        return -1
     return reachable_area(child)
-def minimax(board, depth, alpha, beta, isMaximizing, belief):
+
+def minimax(board, depth, alpha, beta, isMaximizing, belief, pos_history = None):
     if depth == 0 or board.is_game_over():
-        return evaluate(board, belief)
+        return evaluate(board, belief, pos_history)
 
     moves = board.get_valid_moves()
 
@@ -154,7 +191,7 @@ def minimax(board, depth, alpha, beta, isMaximizing, belief):
             if child is None:
                 continue
             child.reverse_perspective()
-            eval_score = minimax(child, depth - 1, alpha, beta, False, belief)
+            eval_score = minimax(child, depth - 1, alpha, beta, False, belief, pos_history)
             maxEval = max(maxEval, eval_score)
             alpha = max(alpha, eval_score)
             if beta <= alpha:
@@ -171,7 +208,7 @@ def minimax(board, depth, alpha, beta, isMaximizing, belief):
                 continue
             child.reverse_perspective()
 
-            eval_score = minimax(child, depth - 1, alpha, beta, True, belief)
+            eval_score = minimax(child, depth - 1, alpha, beta, True, belief, pos_history)
 
             minEval = min(minEval, eval_score)
             beta = min(beta, eval_score)
@@ -188,6 +225,8 @@ class PlayerAgent:
 
     def __init__(self, board: board.Board, time_left: Callable):
         self.belief = TrapdoorBelief(board.game_map)
+        self.prev_pos = None
+        self.pos_history = deque(maxlen=7)
 
     def play(
         self,
@@ -195,8 +234,20 @@ class PlayerAgent:
         sensor_data: List[Tuple[bool, bool]],
         time_left: Callable,
     ):
-        location = board.chicken_player.get_location()
-        print(f"I'm at {location}.")
+        current_pos = board.chicken_player.get_location()
+        self.pos_history.append(current_pos)
+        start_pos = board.chicken_player.get_spawn()
+        if self.prev_pos is not None:
+            if current_pos == start_pos and self.prev_pos != start_pos:
+                print(f"*** TRAPDOOR FALL DETECTED at {self.prev_pos}! ***")
+
+                try:
+                    self.belief.set_trapdoor_at(self.prev_pos)
+                except Exception as e:
+                    print("Warning: set_trapdoor_at failed:", e)
+        self.prev_pos = current_pos
+
+        print(f"I'm at {current_pos}.")
         print(f"Trapdoor A: heard? {sensor_data[0][0]}, felt? {sensor_data[0][1]}")
         print(f"Trapdoor B: heard? {sensor_data[1][0]}, felt? {sensor_data[1][1]}")
         print(f"Starting to think with {time_left()} seconds left.")
@@ -204,7 +255,7 @@ class PlayerAgent:
         (hw, fw) = sensor_data[0]
         (hb, fb) = sensor_data[1]
         self.belief.update(
-            pos=location,
+            pos=current_pos,
             heard_white=hw,
             felt_white=fw,
             heard_black=hb,
@@ -222,7 +273,7 @@ class PlayerAgent:
                 continue
 
             child.reverse_perspective()
-            value = minimax(child, 3, -math.inf, math.inf, False, self.belief)
+            value = minimax(child, 3, -math.inf, math.inf, False, self.belief, self.pos_history)
 
             print(f"Move {direction.name}, {move_type.name} → value {value}")
 
@@ -233,9 +284,10 @@ class PlayerAgent:
         if not candidates:
             return moves[0]
 
-        # minimax value
-        best_by_value = max(candidates, key=lambda x: x[1])[0]
-
+        best_value = max(candidates, key=lambda x: x[1])[1]
+        epsilon = 0.01
+        top_candidates = [c for c in candidates if c[1] >= best_value - epsilon]
+        best_by_value = random.choice(top_candidates)[0]
         #SAFETY FILTER :)
         current_area = reachable_area(board)
 
@@ -246,7 +298,7 @@ class PlayerAgent:
             return reachable_area(child)
         area_after_best = move_area(best_by_value[0], best_by_value[1])
 
-        if (area_after_best >= max(1, 0.6 * current_area)):
+        if (area_after_best >= max(1, 0.35 * current_area)):
             print(f"SAFE best move → {best_by_value}")
             return best_by_value
 
@@ -257,7 +309,10 @@ class PlayerAgent:
                 safe_moves.append(((d, m), v, a))
 
         if safe_moves:
-            chosen = max(safe_moves, key=lambda x: (x[1], x[2]))[0]
+            best_safe_value = max(safe_moves, key=lambda x: x[1])[1]
+            epsilon = 0.01
+            top_safe = [s for s in safe_moves if s[1] >= best_safe_value - epsilon]
+            chosen = random.choice(top_safe)[0]
             print(f"Fallback SAFE move → {chosen}")
             return chosen
         #tiebreak

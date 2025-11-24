@@ -125,11 +125,29 @@ def reachable_area(board):
     return len(visited)
 
 def reachable_area_enemy(board):
-    # Create a perspective-swapped board without copying
-    board.reverse_perspective()
-    area = reachable_area(board)
-    board.reverse_perspective()
-    return area
+    start = board.chicken_enemy.get_location()
+    visited = {start}
+    q = deque([start])
+
+    while q:
+        x, y = q.popleft()
+        for dx, dy in [(1,0),(-1,0),(0,1),(0,-1)]:
+            nx, ny = x + dx, y + dy
+
+            # enemy movement uses enemy=True checks
+            if not board.is_valid_cell((nx, ny)):
+                continue
+
+            # enemy cannot move into its own blocked zones
+            # reuse board.is_valid_move by simulating a step
+            if board.is_cell_blocked((nx, ny)):
+                continue
+
+            if (nx, ny) not in visited:
+                visited.add((nx, ny))
+                q.append((nx, ny))
+
+    return len(visited)
 
 def move_reachable_area_after(board, direction, move_type):
     child = board.forecast_move(direction, move_type)

@@ -4,7 +4,7 @@ from collections.abc import Callable
 from typing import List, Set, Tuple
 from .trapdoor_belief import TrapdoorBelief
 import numpy as np
-from game import *
+from engine.game import *
 
 """
 min max algo with alpha pruning, bayes for updating belief for trapdoors
@@ -47,15 +47,20 @@ def evaluate(board, belief):
 
 
     # Offesne turd bonus
+    t_left = board.chicken_player.get_turds_left()
     px, py = board.chicken_player.get_location()
     ex, ey = board.chicken_enemy.get_location()
     dist = abs(px - ex) + abs(py - ey)
+    if board.turn_count < 12:
+        if len(board.turds_player) > 0:
+            if board.chicken_player.get_turds_left() >= 4:
+                score -= 1.2
 
     if board.chicken_player.get_turds_left() > 0:
-        if dist == 2:
-            score += 1.0
-        elif dist == 3:
-            score += 0.3
+        if dist <= 2:
+            score += 0.8
+        else:
+            score -= 0.4
     # standing next to your own turds
     for (tx, ty) in board.turds_player:
         d = abs(tx - x) + abs(ty - y)
@@ -125,11 +130,29 @@ def reachable_area(board):
     return len(visited)
 
 def reachable_area_enemy(board):
-    # Create a perspective-swapped board without copying
-    board.reverse_perspective()
-    area = reachable_area(board)
-    board.reverse_perspective()
-    return area
+    start = board.chicken_enemy.get_location()
+    visited = {start}
+    q = deque([start])
+
+    while q:
+        x, y = q.popleft()
+        for dx, dy in [(1,0),(-1,0),(0,1),(0,-1)]:
+            nx, ny = x + dx, y + dy
+
+            # enemy movement uses enemy=True checks
+            if not board.is_valid_cell((nx, ny)):
+                continue
+
+            # enemy cannot move into its own blocked zones
+            # reuse board.is_valid_move by simulating a step
+            if board.is_cell_blocked((nx, ny)):
+                continue
+
+            if (nx, ny) not in visited:
+                visited.add((nx, ny))
+                q.append((nx, ny))
+
+    return len(visited)
 
 def move_reachable_area_after(board, direction, move_type):
     child = board.forecast_move(direction, move_type)
@@ -163,7 +186,7 @@ def minimax(board, depth, alpha, beta, isMaximizing, belief):
 
     else:
         minEval = math.inf
-        moves_sorted = sorted(moves, key=lambda mv: 0 if mv[1].name == "TURD" else 1)
+        moves_sorted = sorted(moves, key=lambda mv: 0 if mv[1].name == "EGG" else 1)
 
         for direction, move_type in moves_sorted:
             child = board.forecast_move(direction, move_type)
@@ -203,6 +226,7 @@ class PlayerAgent:
 
         (hw, fw) = sensor_data[0]
         (hb, fb) = sensor_data[1]
+
         self.belief.update(
             pos=location,
             heard_white=hw,
@@ -213,55 +237,73 @@ class PlayerAgent:
 
         moves = board.get_valid_moves()
         best_value = -math.inf
-        candidates = []  #((dir, move_type), score)
+        candidates = []
 
-        # Evaluate moves normally using minimax
         for direction, move_type in moves:
             child = board.forecast_move(direction, move_type)
             if child is None:
                 continue
 
             child.reverse_perspective()
-            value = minimax(child, 3, -math.inf, math.inf, False, self.belief)
 
+            value = minimax(child, 3, -math.inf, math.inf, False, self.belief)
             print(f"Move {direction.name}, {move_type.name} → value {value}")
 
             candidates.append(((direction, move_type), value))
+            best_value = max(best_value, value)
 
-            if value > best_value:
-                best_value = value
         if not candidates:
             return moves[0]
 
-        # minimax value
-        best_by_value = max(candidates, key=lambda x: x[1])[0]
+        best_move = max(candidates, key=lambda x: x[1])[0]
 
-        #SAFETY FILTER :)
+        def trap_prob_after(dir, mt):
+            child = board.forecast_move(dir, mt)
+            if child is None:
+                return 1.0
+            child.reverse_perspective()
+
+            x, y = child.chicken_player.get_location()
+            return self.belief.white_probs[x, y] + self.belief.black_probs[x, y]
+
         current_area = reachable_area(board)
 
         def move_area(dir, mt):
             child = board.forecast_move(dir, mt)
             if child is None:
                 return -1
+            child.reverse_perspective()
             return reachable_area(child)
-        area_after_best = move_area(best_by_value[0], best_by_value[1])
 
-        if (area_after_best >= max(1, 0.6 * current_area)):
-            print(f"SAFE best move → {best_by_value}")
-            return best_by_value
+        best_area = move_area(best_move[0], best_move[1])
+        best_trap = trap_prob_after(best_move[0], best_move[1])
 
-        safe_moves = []
-        for (d, m), v in candidates:
+        if best_area >= max(1, 0.6 * current_area) and best_trap < 0.15:
+            print(f"SAFE best move → {best_move}")
+            return best_move
+
+        safe = []
+        for (d, m), val in candidates:
             a = move_area(d, m)
-            if a >= max(1, 0.6 * current_area):
-                safe_moves.append(((d, m), v, a))
+            p = trap_prob_after(d, m)
+            if a >= max(1, 0.6 * current_area) and p < 0.15:
+                safe.append(((d, m), val, a))
 
-        if safe_moves:
-            chosen = max(safe_moves, key=lambda x: (x[1], x[2]))[0]
+        if safe:
+            # pick best value, then max area
+            chosen = max(safe, key=lambda x: (x[1], x[2]))[0]
             print(f"Fallback SAFE move → {chosen}")
             return chosen
-        #tiebreak
-        fallback = max( candidates, key=lambda x: (move_area(x[0][0], x[0][1]), x[1]))[0]
-        print(f"No safe options — using MAX AREA fallback → {fallback}")
+
+
+        emergency = []
+        for (d, m), val in candidates:
+            a = move_area(d, m)
+            p = trap_prob_after(d, m)
+            emergency.append(((d, m), a, -p, val))
+
+
+        fallback = max(emergency, key=lambda x: (x[1], x[2], x[3]))[0]
+        print(f"No safe options — using MAX AREA WITH TRAP AWARE fallback → {fallback}")
         return fallback
 
