@@ -75,3 +75,6 @@ class TrapdoorBelief:
             return belief
         return posterior / s
 
+
+
+

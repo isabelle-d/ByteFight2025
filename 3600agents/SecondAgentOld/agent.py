@@ -4,7 +4,7 @@ from collections.abc import Callable
 from typing import List, Set, Tuple
 from .trapdoor_belief import TrapdoorBelief
 import numpy as np
-from game import *
+from engine.game import *
 
 """
 min max algo with alpha pruning, bayes for updating belief for trapdoors
@@ -47,15 +47,20 @@ def evaluate(board, belief):
 
 
     # Offesne turd bonus
+    t_left = board.chicken_player.get_turds_left()
     px, py = board.chicken_player.get_location()
     ex, ey = board.chicken_enemy.get_location()
     dist = abs(px - ex) + abs(py - ey)
+    if board.turn_count < 12:
+        if len(board.turds_player) > 0:
+            if board.chicken_player.get_turds_left() >= 4:
+                score -= 1.2
 
     if board.chicken_player.get_turds_left() > 0:
-        if dist == 2:
-            score += 1.0
-        elif dist == 3:
-            score += 0.3
+        if dist <= 2:
+            score += 0.8
+        else:
+            score -= 0.4
     # standing next to your own turds
     for (tx, ty) in board.turds_player:
         d = abs(tx - x) + abs(ty - y)
@@ -181,7 +186,7 @@ def minimax(board, depth, alpha, beta, isMaximizing, belief):
 
     else:
         minEval = math.inf
-        moves_sorted = sorted(moves, key=lambda mv: 0 if mv[1].name == "TURD" else 1)
+        moves_sorted = sorted(moves, key=lambda mv: 0 if mv[1].name == "EGG" else 1)
 
         for direction, move_type in moves_sorted:
             child = board.forecast_move(direction, move_type)
